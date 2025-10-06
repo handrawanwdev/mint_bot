@@ -4,47 +4,48 @@ const path = require("path");
 const { parse } = require("csv-parse/sync");
 
 const PARALLEL_LIMIT = 5;
-const DELAY_MS = 500;
+const DELAY_MS = 100; // delay antar chunk untuk aman
 const API_URL = "https://antrisimatupang.com";
 const tokenPattern = /name="_token"\s+value="([^"]+)"/;
 
 let processedData = [];
 
-// --- HELPER ---
+// --- HELPERS ---
 async function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function readCSV(filePath) {
   const csvPath = path.resolve(filePath);
-  if (!fs.existsSync(csvPath)) {
-    throw new Error(`File CSV tidak ditemukan: ${csvPath}`);
-  }
+  if (!fs.existsSync(csvPath)) throw new Error(`File CSV tidak ditemukan: ${csvPath}`);
 
   const raw = fs.readFileSync(csvPath, "utf-8");
   const records = parse(raw, {
-    columns: (header) => header.map((h) => h.trim().toLowerCase()),
+    columns: header => header.map(h => h.trim().toLowerCase()),
     skip_empty_lines: true,
     trim: true,
   });
 
   const requiredCols = ["name", "ktp", "phone"];
-  const missing = requiredCols.filter((col) => !(col in records[0]));
-  if (missing.length > 0) {
-    throw new Error(`Kolom hilang di CSV: ${missing.join(", ")}`);
-  }
+  const missing = requiredCols.filter(col => !(col in records[0]));
+  if (missing.length > 0) throw new Error(`Kolom hilang di CSV: ${missing.join(", ")}`);
 
   return records;
 }
 
+// --- Ambil token CSRF fresh + cookies ---
 async function getToken() {
-  const resp = await fetch(API_URL, { headers: { "User-Agent": "Mozilla/5.0" } });
+  const resp = await fetch(API_URL, {
+    headers: { "User-Agent": "Mozilla/5.0" },
+    credentials: "include" // penting agar session valid
+  });
   const html = await resp.text();
   const match = html.match(tokenPattern);
   if (!match) throw new Error("_token tidak ditemukan");
   return match[1];
 }
 
+// --- Ambil captcha (jika diperlukan) ---
 async function getCaptcha() {
   try {
     const resp = await fetch(`${API_URL}/reload-captcha`, {
@@ -59,23 +60,25 @@ async function getCaptcha() {
   }
 }
 
-// --- CEK HASIL PENDAFTARAN MULTILINE ---
+// --- Cek hasil pendaftaran ---
 async function checkRegistration(ktp) {
   try {
     const resp = await fetch(`${API_URL}/search?ktp=${ktp}`, {
       headers: { "User-Agent": "Mozilla/5.0" },
+      credentials: "include",
     });
     const html = await resp.text();
 
-    const info = {};
-    info.website = API_URL;
-    info.nomorAntrian = (html.match(/Nomor Antrian\s*:\s*([A-Z0-9\-]+)/) || [])[1] || "N/A";
-    info.ref = (html.match(/Ref\s*:\s*([0-9]+)/) || [])[1] || "N/A";
-    info.namaKTP = (html.match(/Nama KTP\s*:\s*([\w\s]+)/) || [])[1] || "N/A";
-    info.nomorKTP = (html.match(/Nomor KTP\s*:\s*(\*+[\d]+)/) || [])[1] || "N/A";
-    info.nomorHP = (html.match(/Nomor HP\s*:\s*(\*+[\d]+)/) || [])[1] || "N/A";
-    info.tanggalDatang = (html.match(/Tanggal Datang\s*:\s*([\d\-]+)/) || [])[1] || "N/A";
-    info.wajibHadir = (html.match(/Wajib Hadir\s*:\s*([\d\.: -]+)/) || [])[1] || "N/A";
+    const info = {
+      website: API_URL,
+      nomorAntrian: (html.match(/Nomor Antrian\s*:\s*([A-Z0-9\-]+)/) || [])[1] || "N/A",
+      ref: (html.match(/Ref\s*:\s*([0-9]+)/) || [])[1] || "N/A",
+      namaKTP: (html.match(/Nama KTP\s*:\s*([\w\s]+)/) || [])[1] || "N/A",
+      nomorKTP: (html.match(/Nomor KTP\s*:\s*(\*+[\d]+)/) || [])[1] || "N/A",
+      nomorHP: (html.match(/Nomor HP\s*:\s*(\*+[\d]+)/) || [])[1] || "N/A",
+      tanggalDatang: (html.match(/Tanggal Datang\s*:\s*([\d\-]+)/) || [])[1] || "N/A",
+      wajibHadir: (html.match(/Wajib Hadir\s*:\s*([\d\.: -]+)/) || [])[1] || "N/A",
+    };
 
     return `
 ===== PENDAFTARAN BERHASIL =====
@@ -94,68 +97,69 @@ Wajib Hadir    : ${info.wajibHadir}
   }
 }
 
-// --- POST DATA + CEK REGISTRATION ---
-async function postData(item, token, captcha) {
-  const payload = {
-    name: item.name,
-    ktp: item.ktp.replace(/\D/g, "").slice(0, 16),
-    phone_number: item.phone.replace(/\D/g, "").slice(0, 12),
-    captcha_input: captcha,
-    check: "on",
-    check_2: "on",
-    _token: token,
-  };
+// --- POST DATA ---
+async function postData(item) {
+  try {
+    const token = await getToken();
+    const captcha = await getCaptcha();
 
-  const resp = await fetch(API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": "Mozilla/5.0",
-    },
-    body: new URLSearchParams(payload).toString(),
-  });
+    const payload = {
+      name: item.name,
+      ktp: item.ktp.replace(/\D/g, "").slice(0, 16),
+      phone_number: item.phone.replace(/\D/g, "").slice(0, 12),
+      captcha_input: captcha,
+      check: "on",
+      check_2: "on",
+      _token: token,
+    };
 
-  const resultText = await resp.text();
+    const resp = await fetch(API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "Mozilla/5.0",
+      },
+      body: new URLSearchParams(payload).toString(),
+      credentials: "include",
+    });
 
-  let registrationInfo = "";
-  if (resultText.includes("Pendaftaran Berhasil")) {
-    registrationInfo = await checkRegistration(payload.ktp);
+    const resultText = await resp.text();
+    let registrationInfo = "";
+
+    if (resultText.includes("Pendaftaran Berhasil")) {
+      registrationInfo = await checkRegistration(payload.ktp);
+    }
+
+    return { ...payload, status: "OK", resultSnippet: resultText, registrationInfo };
+  } catch (err) {
+    return { ...item, status: "ERROR", error_message: err.message, registrationInfo: "" };
   }
-
-  return { ...payload, result: resultText.substring(0, 300), registrationInfo };
 }
 
-// --- SIMPAN HASIL JSON & CSV MULTILINE ---
+// --- SIMPAN HASIL ---
 function saveResults(data) {
   if (!data.length) return;
 
   const allKeys = new Set();
-  data.forEach((r) => Object.keys(r).forEach((k) => allKeys.add(k)));
+  data.forEach(r => Object.keys(r).forEach(k => allKeys.add(k)));
   const headers = Array.from(allKeys);
 
   // JSON
   fs.writeFileSync("processedData.json", JSON.stringify(data, null, 2));
   console.log("✅ Semua data disimpan ke processedData.json");
 
-  // CSV (escape newline supaya aman)
-  const csv = data
-    .map((r) =>
-      headers
-        .map((h) => {
-          let val = r[h] !== undefined ? String(r[h]) : "";
-          val = val.replace(/"/g, '""');
-          val = val.replace(/\r?\n/g, "\\n"); // escape newline
-          return `"${val}"`;
-        })
-        .join(",")
-    )
-    .join("\n");
+  // CSV
+  const csv = data.map(r => headers.map(h => {
+    let val = r[h] !== undefined ? String(r[h]) : "";
+    val = val.replace(/"/g, '""').replace(/\r?\n/g, "\\n");
+    return `"${val}"`;
+  }).join(",")).join("\n");
 
   fs.writeFileSync("processedData.csv", headers.join(",") + "\n" + csv);
-  console.log("✅ CSV hasil disimpan ke processedData.csv (multiline aman)");
+  console.log("✅ CSV hasil disimpan ke processedData.csv");
 }
 
-// --- MAIN BATCH MULTILINE ---
+// --- MAIN BATCH ---
 async function runBatch() {
   console.log("🚀 Mulai batch...");
 
@@ -165,45 +169,24 @@ async function runBatch() {
 
   for (let i = 0; i < batchData.length; i += PARALLEL_LIMIT) {
     const chunk = batchData.slice(i, i + PARALLEL_LIMIT);
-    const promises = chunk.map(async (item, index) => {
-      try {
-        const token = await getToken();
-        const captcha = await getCaptcha();
-        const res = await postData(item, token, captcha);
-
-        return {
-          ...res,
-          status: "OK",
-          error_message: "",
-          registrationInfo: res.registrationInfo || "",
-        };
-      } catch (err) {
-        console.log(`⚠️ Error pada item ${i + index + 1} (${item.name}):`, err.message);
-        return { ...item, status: "ERROR", error_message: err.message, registrationInfo: "" };
-      }
-    });
-
+    const promises = chunk.map(item => postData(item));
     const results = await Promise.all(promises);
     processedData.push(...results);
 
-    // Preview multiline console
     results.forEach((r, idx) => {
-      console.log(`\n📌 Item ${i + idx + 1} - ${r.name} - Status: ${r.status}`);
-      if (r.status === "OK" && r.registrationInfo) {
-        console.log(r.registrationInfo);
-      } else if (r.status === "ERROR") {
-        console.log(`⚠️ Error: ${r.error_message}`);
-      }
+      console.log(`\n📌 Item ${i + idx + 1} - ${r.name || r.ktp} - Status: ${r.status}`);
+      if (r.status === "OK" && r.registrationInfo) console.log(r.registrationInfo);
+      if (r.status === "ERROR") console.log(`⚠️ Error: ${r.error_message}`);
     });
 
     await delay(DELAY_MS);
   }
 
   saveResults(processedData);
-
   const durasi = (Date.now() - startTime) / 1000;
   console.log(`\n⏱️ Selesai dalam ${durasi.toFixed(2)} detik`);
 }
+
 
 // ======= VARIABEL JAM DINAMIS =======
 const SCHEDULE_HOUR = 15;    // jam 8 pagi
@@ -257,4 +240,5 @@ async function scheduleBatch() {
 }
 
 // ======= JALANKAN SCHEDULER =======
-scheduleBatch();
+// scheduleBatch();
+runBatch().catch((err) => console.error("🚨 Error batch:", err));
