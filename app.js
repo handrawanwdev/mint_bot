@@ -6,6 +6,11 @@ const { parse } = require("csv-parse/sync");
 const args = process.argv.slice(2);
 const options = {};
 
+const ERROR_LOG_PATH = path.join(__dirname, "errors.log"); // atau "errors.csv"
+if (!fs.existsSync(ERROR_LOG_PATH)) {
+  fs.writeFileSync(ERROR_LOG_PATH, "timestamp,ktp,name,error_message\n", "utf-8");
+}
+
 // Parse argument --key=value
 args.forEach(arg => {
   const [key, value] = arg.split("=");
@@ -23,6 +28,16 @@ const tokenPattern = /name="_token"\s+value="([^"]+)"/;
 let processedData = [];
 
 // --- HELPERS ---
+// Format waktu lokal rapi: 2025-10-06 16:25:45
+function getLocalTimestamp() {
+  const now = new Date();
+  const pad = (n) => n.toString().padStart(2, "0");
+  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const time = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  return `${date} ${time}`;
+}
+
+
 async function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -140,10 +155,19 @@ async function postData(item) {
 
     if (resultText.includes("Pendaftaran Berhasil")) {
       registrationInfo = await checkRegistration(payload.ktp);
+      return { ...payload, status: "OK", resultSnippet: resultText, registrationInfo };
+    }else{
+      const errorContent = resultText;
+      const errorMessageMatch = errorContent.match(/<div class="alert alert-danger" role="alert">([\s\S]*?)<\/div>/);
+      const errorMessage = errorMessageMatch ? errorMessageMatch[1].replace(/<[^>]+>/g, '').trim() : `Pendaftaran gagal tanpa pesan error spesifik. ${errorContent} <-- Periksa manual di browser.`;
+      const logLine = `[${getLocalTimestamp()}] ${payload.ktp} | ${payload.name || "-"} | ${errorMessage}\n`;
+      fs.appendFileSync(ERROR_LOG_PATH, logLine, "utf-8");
+      return { ...item, status: "ERROR", error_message: errorMessage, registrationInfo: "" };
     }
 
-    return { ...payload, status: "OK", resultSnippet: resultText, registrationInfo };
   } catch (err) {
+    const logLine = `[${getLocalTimestamp()}] ${item.ktp} | ${item.name || "-"} | ${err.message}\n`;
+    fs.appendFileSync(ERROR_LOG_PATH, logLine, "utf-8");
     return { ...item, status: "ERROR", error_message: err.message, registrationInfo: "" };
   }
 }
@@ -252,5 +276,5 @@ async function scheduleBatch() {
 }
 
 // ======= JALANKAN SCHEDULER =======
-scheduleBatch();
-// runBatch().catch((err) => console.error("🚨 Error batch:", err));
+// scheduleBatch();
+runBatch().catch((err) => console.error("🚨 Error batch:", err));
