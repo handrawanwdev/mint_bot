@@ -6,18 +6,30 @@ const { parse } = require("csv-parse/sync");
 const args = process.argv.slice(2);
 const options = {};
 
-const ERROR_LOG_PATH = path.join(__dirname, "errors.log"); // atau "errors.csv"
-if (!fs.existsSync(ERROR_LOG_PATH)) {
-  fs.writeFileSync(ERROR_LOG_PATH, "timestamp,ktp,name,error_message\n", "utf-8");
-}
-
 // Parse argument --key=value
-args.forEach(arg => {
+args.forEach((arg) => {
   const [key, value] = arg.split("=");
   if (key && value) {
     options[key.replace(/^--/, "")] = value;
   }
 });
+
+const ERROR_LOG_PATH = path.join(__dirname, "errors.log"); // atau "errors.csv"
+if (!fs.existsSync(ERROR_LOG_PATH)) {
+  fs.writeFileSync(
+    ERROR_LOG_PATH,
+    "timestamp,ktp,name,error_message\n",
+    "utf-8"
+  );
+}
+
+// Folder tempat simpan HTML error
+const ERROR_DIR = path.join(__dirname, "errors");
+
+// Pastikan folder 'errors' sudah ada
+if (!fs.existsSync(ERROR_DIR)) {
+  fs.mkdirSync(ERROR_DIR);
+}
 
 const PARALLEL_LIMIT = 5;
 const DELAY_MS = 100; // delay antar chunk untuk aman
@@ -32,30 +44,35 @@ let processedData = [];
 function getLocalTimestamp() {
   const now = new Date();
   const pad = (n) => n.toString().padStart(2, "0");
-  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-  const time = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(
+    now.getDate()
+  )}`;
+  const time = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(
+    now.getSeconds()
+  )}`;
   return `${date} ${time}`;
 }
 
-
 async function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function readCSV(filePath) {
   const csvPath = path.resolve(filePath);
-  if (!fs.existsSync(csvPath)) throw new Error(`File CSV tidak ditemukan: ${csvPath}`);
+  if (!fs.existsSync(csvPath))
+    throw new Error(`File CSV tidak ditemukan: ${csvPath}`);
 
   const raw = fs.readFileSync(csvPath, "utf-8");
   const records = parse(raw, {
-    columns: header => header.map(h => h.trim().toLowerCase()),
+    columns: (header) => header.map((h) => h.trim().toLowerCase()),
     skip_empty_lines: true,
     trim: true,
   });
 
   const requiredCols = ["name", "ktp", "phone"];
-  const missing = requiredCols.filter(col => !(col in records[0]));
-  if (missing.length > 0) throw new Error(`Kolom hilang di CSV: ${missing.join(", ")}`);
+  const missing = requiredCols.filter((col) => !(col in records[0]));
+  if (missing.length > 0)
+    throw new Error(`Kolom hilang di CSV: ${missing.join(", ")}`);
 
   return records;
 }
@@ -64,7 +81,7 @@ function readCSV(filePath) {
 async function getToken() {
   const resp = await fetch(API_URL, {
     headers: { "User-Agent": "Mozilla/5.0" },
-    credentials: "include" // penting agar session valid
+    credentials: "include", // penting agar session valid
   });
   const html = await resp.text();
   const match = html.match(tokenPattern);
@@ -98,13 +115,16 @@ async function checkRegistration(ktp) {
 
     const info = {
       website: API_URL,
-      nomorAntrian: (html.match(/Nomor Antrian\s*:\s*([A-Z0-9\-]+)/) || [])[1] || "N/A",
+      nomorAntrian:
+        (html.match(/Nomor Antrian\s*:\s*([A-Z0-9\-]+)/) || [])[1] || "N/A",
       ref: (html.match(/Ref\s*:\s*([0-9]+)/) || [])[1] || "N/A",
       namaKTP: (html.match(/Nama KTP\s*:\s*([\w\s]+)/) || [])[1] || "N/A",
       nomorKTP: (html.match(/Nomor KTP\s*:\s*(\*+[\d]+)/) || [])[1] || "N/A",
       nomorHP: (html.match(/Nomor HP\s*:\s*(\*+[\d]+)/) || [])[1] || "N/A",
-      tanggalDatang: (html.match(/Tanggal Datang\s*:\s*([\d\-]+)/) || [])[1] || "N/A",
-      wajibHadir: (html.match(/Wajib Hadir\s*:\s*([\d\.: -]+)/) || [])[1] || "N/A",
+      tanggalDatang:
+        (html.match(/Tanggal Datang\s*:\s*([\d\-]+)/) || [])[1] || "N/A",
+      wajibHadir:
+        (html.match(/Wajib Hadir\s*:\s*([\d\.: -]+)/) || [])[1] || "N/A",
     };
 
     return `
@@ -155,20 +175,52 @@ async function postData(item) {
 
     if (resultText.includes("Pendaftaran Berhasil")) {
       registrationInfo = await checkRegistration(payload.ktp);
-      return { ...payload, status: "OK", resultSnippet: resultText, registrationInfo };
-    }else{
+      return {
+        ...payload,
+        status: "OK",
+        resultSnippet: resultText,
+        registrationInfo,
+      };
+    } else {
       const errorContent = resultText;
-      const errorMessageMatch = errorContent.match(/<div class="alert alert-danger" role="alert">([\s\S]*?)<\/div>/);
-      const errorMessage = errorMessageMatch ? errorMessageMatch[1].replace(/<[^>]+>/g, '').trim() : `Pendaftaran gagal tanpa pesan error spesifik. ${errorContent} <-- Periksa manual di browser.`;
-      const logLine = `[${getLocalTimestamp()}] ${payload.ktp} | ${payload.name || "-"} | ${errorMessage}\n`;
-      fs.appendFileSync(ERROR_LOG_PATH, logLine, "utf-8");
-      return { ...item, status: "ERROR", error_message: errorMessage, registrationInfo: "" };
-    }
+      const errorMessageMatch = errorContent.match(
+        /<div class="alert alert-danger" role="alert">([\s\S]*?)<\/div>/
+      );
 
+      const errorMessage = errorMessageMatch
+        ? errorMessageMatch[1].replace(/<[^>]+>/g, "").trim()
+        : "Pendaftaran gagal tanpa pesan error spesifik.";
+
+      // Buat nama file aman untuk disimpan
+      const safeKtp = payload.ktp.replace(/\D/g, "");
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const fileName = `error_${safeKtp}_${timestamp}.html`;
+      const filePath = path.join(ERROR_DIR, fileName);
+
+      // Simpan full HTML response agar bisa dianalisis nanti
+      fs.writeFileSync(filePath, resultText);
+
+      console.log(`❌ Error disimpan di: ${filePath}`);
+
+      return {
+        ...payload,
+        status: "ERROR",
+        error_message: errorMessage,
+        html_file: fileName,
+        registrationInfo: "",
+      };
+    }
   } catch (err) {
-    const logLine = `[${getLocalTimestamp()}] ${item.ktp} | ${item.name || "-"} | ${err.message}\n`;
+    const logLine = `[${getLocalTimestamp()}] ${item.ktp} | ${
+      item.name || "-"
+    } | ${err.message}\n`;
     fs.appendFileSync(ERROR_LOG_PATH, logLine, "utf-8");
-    return { ...item, status: "ERROR", error_message: err.message, registrationInfo: "" };
+    return {
+      ...item,
+      status: "ERROR",
+      error_message: err.message,
+      registrationInfo: "",
+    };
   }
 }
 
@@ -177,7 +229,7 @@ function saveResults(data) {
   if (!data.length) return;
 
   const allKeys = new Set();
-  data.forEach(r => Object.keys(r).forEach(k => allKeys.add(k)));
+  data.forEach((r) => Object.keys(r).forEach((k) => allKeys.add(k)));
   const headers = Array.from(allKeys);
 
   // JSON
@@ -185,11 +237,17 @@ function saveResults(data) {
   console.log("✅ Semua data disimpan ke processedData.json");
 
   // CSV
-  const csv = data.map(r => headers.map(h => {
-    let val = r[h] !== undefined ? String(r[h]) : "";
-    val = val.replace(/"/g, '""').replace(/\r?\n/g, "\\n");
-    return `"${val}"`;
-  }).join(",")).join("\n");
+  const csv = data
+    .map((r) =>
+      headers
+        .map((h) => {
+          let val = r[h] !== undefined ? String(r[h]) : "";
+          val = val.replace(/"/g, '""').replace(/\r?\n/g, "\\n");
+          return `"${val}"`;
+        })
+        .join(",")
+    )
+    .join("\n");
 
   fs.writeFileSync("processedData.csv", headers.join(",") + "\n" + csv);
   console.log("✅ CSV hasil disimpan ke processedData.csv");
@@ -205,13 +263,16 @@ async function runBatch() {
 
   for (let i = 0; i < batchData.length; i += PARALLEL_LIMIT) {
     const chunk = batchData.slice(i, i + PARALLEL_LIMIT);
-    const promises = chunk.map(item => postData(item));
+    const promises = chunk.map((item) => postData(item));
     const results = await Promise.all(promises);
     processedData.push(...results);
 
     results.forEach((r, idx) => {
-      console.log(`\n📌 Item ${i + idx + 1} - ${r.name || r.ktp} - Status: ${r.status}`);
-      if (r.status === "OK" && r.registrationInfo) console.log(r.registrationInfo);
+      console.log(
+        `\n📌 Item ${i + idx + 1} - ${r.name || r.ktp} - Status: ${r.status}`
+      );
+      if (r.status === "OK" && r.registrationInfo)
+        console.log(r.registrationInfo);
       if (r.status === "ERROR") console.log(`⚠️ Error: ${r.error_message}`);
     });
 
@@ -222,7 +283,6 @@ async function runBatch() {
   const durasi = (Date.now() - startTime) / 1000;
   console.log(`\n⏱️ Selesai dalam ${durasi.toFixed(2)} detik`);
 }
-
 
 // ======= VARIABEL JAM DINAMIS =======
 const SCHEDULE_HOUR = parseInt(options.hour) || 15; // example default 15 = jam 3 sore
@@ -264,7 +324,11 @@ async function scheduleBatch() {
     );
   }, 1000);
 
-  console.log(`🕒 [${API_URL}] Batch dijadwalkan pukul ${SCHEDULE_HOUR}:${SCHEDULE_MINUTE}:${SCHEDULE_SECOND} (delay ${Math.round(delayMs / 1000)} detik)`);
+  console.log(
+    `🕒 [${API_URL}] Batch dijadwalkan pukul ${SCHEDULE_HOUR}:${SCHEDULE_MINUTE}:${SCHEDULE_SECOND} (delay ${Math.round(
+      delayMs / 1000
+    )} detik)`
+  );
 
   setTimeout(async () => {
     console.log(`\n⏰ Waktu batch tiba! Mulai runBatch()`);
