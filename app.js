@@ -3,9 +3,22 @@ const fs = require("fs");
 const path = require("path");
 const { parse } = require("csv-parse/sync");
 
+// Ambil argument dari command line
+const args = process.argv.slice(2);
+const options = {};
+
+// Parse argument --key=value
+args.forEach(arg => {
+  const [key, value] = arg.split("=");
+  if (key && value) {
+    options[key.replace(/^--/, "")] = value;
+  }
+});
+
 const PARALLEL_LIMIT = 5;
 const DELAY_MS = 100; // delay antar chunk untuk aman
-const API_URL = "https://antrisimatupang.com";
+const API_URL = options.url || "https://antrisimatupang.com";
+const CSV_FILE = options.csv || "batch_data.csv";
 const tokenPattern = /name="_token"\s+value="([^"]+)"/;
 
 let processedData = [];
@@ -164,8 +177,8 @@ async function runBatch() {
   console.log("🚀 Mulai batch...");
 
   const startTime = Date.now();
-  const batchData = readCSV("batch_data.csv");
-  console.log(`📋 Membaca ${batchData.length} data dari batch_data.csv`);
+  const batchData = readCSV(CSV_FILE);
+  console.log(`📋 Membaca ${batchData.length} data dari ${CSV_FILE}`);
 
   for (let i = 0; i < batchData.length; i += PARALLEL_LIMIT) {
     const chunk = batchData.slice(i, i + PARALLEL_LIMIT);
@@ -189,9 +202,9 @@ async function runBatch() {
 
 
 // ======= VARIABEL JAM DINAMIS =======
-const SCHEDULE_HOUR = 15;    // jam 8 pagi
-const SCHEDULE_MINUTE = 0; // menit 30
-const SCHEDULE_SECOND = 0;  // detik 0
+const SCHEDULE_HOUR = parseInt(options.hour) || 15; // example default 15 = jam 3 sore
+const SCHEDULE_MINUTE = parseInt(options.minute) || 0; // example default 0 = menit 0
+const SCHEDULE_SECOND = parseInt(options.second) || 0; // example default 0 = detik 0
 
 // ======= HITUNG DELAY MS KE WAKTU TARGET =======
 function getDelayToTime(hour, minute = 0, second = 0) {
@@ -228,7 +241,7 @@ async function scheduleBatch() {
     );
   }, 1000);
 
-  console.log(`🕒 Batch dijadwalkan pukul ${SCHEDULE_HOUR}:${SCHEDULE_MINUTE}:${SCHEDULE_SECOND} (delay ${Math.round(delayMs / 1000)} detik)`);
+  console.log(`🕒 [${API_URL}] Batch dijadwalkan pukul ${SCHEDULE_HOUR}:${SCHEDULE_MINUTE}:${SCHEDULE_SECOND} (delay ${Math.round(delayMs / 1000)} detik)`);
 
   setTimeout(async () => {
     console.log(`\n⏰ Waktu batch tiba! Mulai runBatch()`);
@@ -240,5 +253,5 @@ async function scheduleBatch() {
 }
 
 // ======= JALANKAN SCHEDULER =======
-// scheduleBatch();
-runBatch().catch((err) => console.error("🚨 Error batch:", err));
+scheduleBatch();
+// runBatch().catch((err) => console.error("🚨 Error batch:", err));
