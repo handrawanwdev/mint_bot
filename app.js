@@ -5,7 +5,7 @@ const { parse } = require("csv-parse/sync");
 
 const PARALLEL_LIMIT = 5;
 const DELAY_MS = 500;
-const API_URL = "https://antrigrahadipta.com";
+const API_URL = "https://antrisimatupang.com";
 const tokenPattern = /name="_token"\s+value="([^"]+)"/;
 
 let processedData = [];
@@ -206,8 +206,8 @@ async function runBatch() {
 }
 
 // ======= VARIABEL JAM DINAMIS =======
-const SCHEDULE_HOUR = 8;    // jam 8 pagi
-const SCHEDULE_MINUTE = 30; // menit 30
+const SCHEDULE_HOUR = 15;    // jam 8 pagi
+const SCHEDULE_MINUTE = 0; // menit 30
 const SCHEDULE_SECOND = 0;  // detik 0
 
 // ======= HITUNG DELAY MS KE WAKTU TARGET =======
@@ -232,7 +232,19 @@ function getDelayToTime(hour, minute = 0, second = 0) {
 
 // ======= SCHEDULE BATCH OTOMATIS =======
 async function scheduleBatch() {
-  const delayMs = getDelayToTime(SCHEDULE_HOUR, SCHEDULE_MINUTE, SCHEDULE_SECOND);
+  let delayMs = getDelayToTime(SCHEDULE_HOUR, SCHEDULE_MINUTE, SCHEDULE_SECOND);
+
+  setInterval(() => {
+    // Konversi detik ke jam, menit, detik
+    delayMs = getDelayToTime(SCHEDULE_HOUR, SCHEDULE_MINUTE, SCHEDULE_SECOND);
+    const hours = Math.floor(delayMs / 3600000);
+    const minutes = Math.floor((delayMs % 3600000) / 60000);
+    const seconds = Math.floor((delayMs % 60000) / 1000);
+    process.stdout.write(
+      `\r🕒 Menunggu batch berikutnya pada ${delayMs} ms → ${hours} jam ${minutes} menit ${seconds} detik`
+    );
+  }, 1000);
+
   console.log(`🕒 Batch dijadwalkan pukul ${SCHEDULE_HOUR}:${SCHEDULE_MINUTE}:${SCHEDULE_SECOND} (delay ${Math.round(delayMs / 1000)} detik)`);
 
   setTimeout(async () => {
