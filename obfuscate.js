@@ -1,11 +1,11 @@
-// obfuscate-simple.js
+// obfuscate.js
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const obfuscator = require("javascript-obfuscator");
 
 if (process.argv.length < 3) {
-  console.log("Usage: node obfuscate-simple.js <input.js> [--user=USERNAME] [--pass=PASSWORD]");
+  console.log("Usage: node obfuscate.js <input.js> [--user=USERNAME] [--pass=PASSWORD]");
   process.exit(1);
 }
 
