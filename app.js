@@ -218,71 +218,106 @@ async function getTokenAndCaptcha() {
 // ==========================
 // 📤 POST DATA
 // ==========================
-async function postData(item, attempt = 1) {
-  try {
-    await waitUntilServerUp();
+async function postData(item) {
+  // Coba maksimal 2x: sekali normal, sekali retry jika 419/token expired
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      // 1. Ambil halaman baru → dapatkan token & captcha segar
+      const resPage = await fetchWithRetry(API_URL, {
+        method: "GET",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36",
+        },
+      });
+      const html = await resPage.text();
 
-    const { token, captcha } = await getTokenAndCaptcha();
-
-    const payload = {
-      name: item.name,
-      ktp: item.ktp.replace(/\D/g, "").slice(0, 16),
-      phone_number: item.phone.replace(/\D/g, "").slice(0, 12),
-      captcha_input: captcha,
-      check: "on",
-      check_2: "on",
-      _token: token,
-    };
-
-
-    const res = await fetchWithRetry(API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36" },
-      body: new URLSearchParams(payload).toString(),
-    });
-
-    const html = await res.text();
-
-    if (html.includes("Page Expired") || html.includes("419")) {
-      if (attempt >= 3) return { ...payload, status: "ERROR", error_message: "Token kadaluarsa terus menerus" };
-      console.warn("⚠️ Token kadaluarsa, retry 1x...");
-      await delay(1000 + Math.random() * 2000); // jeda kecil antar retry
-      return await postData(item, attempt + 1);
-    }
-
-    if (html.includes("Pendaftaran Berhasil")) {
-      const no_antrian = html.match(/Nomor\s+Antrian:\s*([A-Z0-9]+\s*[A-Z]-\d+)/i);
-      if (no_antrian) {
-        console.log(`   ✅ Pendaftaran berhasil untuk ${item.ktp}|${item.name} → ${no_antrian[1]}`);
+      // Cek apakah antrian ditutup
+      if (html.toUpperCase().includes("TUTUP")) {
+        throw new Error("Situs tutup: ANTRIAN DITUTUP");
       }
-      return { ...payload, status: "OK", info: "Pendaftaran berhasil", error_message: "" };
-    }
 
-    const errMatch = html.match(
-      /<div class="alert alert-danger"[^>]*>([\s\S]*?)<\/div>/
-    );
-    const errMsg = errMatch
-      ? errMatch[1].replace(/<[^>]+>/g, "").trim()
-      : "Error tidak diketahui";
-    const errFile = path.join(
-      ERROR_DIR,
-      `error_${payload.ktp}_${Date.now()}.html`
-    );
-    fs.writeFileSync(errFile, html);
-    console.log(`   ❌ Gagal untuk ${item.ktp}|${item.name}: ${errMsg}`);
-    fs.appendFileSync(
-      ERROR_LOG,
-      `[${timestamp()}] ${item.ktp}|${item.name}|${errMsg}\n`
-    );
-    return { ...payload, status: "ERROR", error_message: errMsg, info: `Simpan HTML error di ${errFile}` };
-  } catch (err) {
-    console.log(`🚨 Gagal proses ${item.ktp}|${item.name}:`, err.message);
-    fs.appendFileSync(
-      ERROR_LOG,
-      `[${timestamp()}] ${item.ktp}|${item.name}|${err.message}\n`
-    );
-    return { ...item, status: "ERROR", error_message: err.message, info: "" };
+      // 2. Ekstrak _token
+      const tokenMatch = html.match(/name="_token"\s+value="([^"]+)"/i);
+      if (!tokenMatch) throw new Error("_token tidak ditemukan");
+      const token = tokenMatch[1];
+
+      // 3. Ekstrak captcha (teks biasa)
+      const captchaMatch = html.match(/<div[^>]+id=["']captcha-box["'][^>]*>([\s\S]*?)<\/div>/i);
+      const captcha = captchaMatch
+        ? captchaMatch[1].replace(/[\s\r\n\t]+/g, "").trim()
+        : "";
+
+      // 4. Siapkan payload
+      const payload = {
+        name: (item.name || "").toString().trim(),
+        ktp: (item.ktp || "").toString().replace(/\D/g, "").slice(0, 16),
+        phone_number: (item.phone || "").toString().replace(/\D/g, "").slice(0, 12),
+        captcha_input: captcha,
+        check: "on",
+        check_2: "on",
+        _token: token,
+      };
+
+      // 5. Kirim langsung tanpa delay
+      const postRes = await fetchWithRetry(API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36",
+          "Referer": API_URL, // WAJIB untuk Laravel CSRF
+        },
+        body: new URLSearchParams(payload).toString(),
+      });
+
+      const postHtml = await postRes.text();
+
+      // 6. Cek hasil
+      if (postHtml.includes("Pendaftaran Berhasil")) {
+        const noMatch = postHtml.match(/Nomor\s+Antrian:\s*([A-Z0-9]+\s*[A-Z]-\d+)/i);
+        const nomor = noMatch ? noMatch[1] : "Nomor tidak terbaca";
+        console.log(`   ✅ ${item.ktp}|${item.name} → ${nomor}`);
+        return { ...payload, status: "OK", info: "Pendaftaran berhasil", error_message: "" };
+      }
+
+      // 7. Jika 419 / Page Expired → retry sekali
+      if (postHtml.includes("419") || postHtml.includes("Page Expired") || postHtml.includes("TokenMismatch")) {
+        if (attempt === 0) {
+          await delay(600 + Math.random() * 400); // delay kecil
+          continue; // ulangi dari awal (ambil halaman baru)
+        } else {
+          throw new Error("Token expired berulang");
+        }
+      }
+
+      // 8. Error validasi (captcha salah, KTP duplikat, dll)
+      const errMatch = postHtml.match(/<div class="alert alert-danger"[^>]*>([\s\S]*?)<\/div>/i);
+      const errMsg = errMatch
+        ? errMatch[1].replace(/<[^>]+>/g, "").trim() || "Validasi gagal"
+        : "Error tidak dikenal";
+
+      // Simpan HTML error
+      const errFile = path.join(ERROR_DIR, `error_${payload.ktp}_${Date.now()}.html`);
+      fs.writeFileSync(errFile, postHtml);
+      console.log(`   ❌ ${item.ktp}|${item.name}: ${errMsg}`);
+      fs.appendFileSync(ERROR_LOG, `${timestamp()},${item.ktp},${item.name},"${errMsg}"\n`);
+
+      return {
+        ...payload,
+        status: "ERROR",
+        error_message: errMsg,
+        info: `HTML: ${path.basename(errFile)}`,
+      };
+
+    } catch (err) {
+      const msg = err.message || "Unknown error";
+      console.log(`   🚨 ${item.ktp}|${item.name}: ${msg}`);
+      fs.appendFileSync(ERROR_LOG, `${timestamp()},${item.ktp},${item.name},"${msg}"\n`);
+      return { ...item, status: "ERROR", error_message: msg, info: "" };
+    }
   }
+
+  // Jika semua retry gagal
+  return { ...item, status: "ERROR", error_message: "Gagal setelah 2 percobaan", info: "" };
 }
 
 // ==========================
@@ -389,5 +424,5 @@ async function scheduleBatch() {
 // ==========================
 // ▶️ JALANKAN
 // ==========================
-scheduleBatch();
-// runBatch().catch((err) => console.error("🚨 Error batch:", err));
+// scheduleBatch();
+runBatch().catch((err) => console.error("🚨 Error batch:", err));
