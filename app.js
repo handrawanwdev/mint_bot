@@ -154,7 +154,7 @@ checkCSVFile(CSV_FILE);
 // 🔐 TOKEN & CAPTCHA
 // ==========================
 async function getTokenAndCaptcha() {
-  const res = await fetchWithRetry(API_URL);
+  const res = await fetchWithRetry(API_URL, { method: "GET", headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36" } });
   const html = await res.text();
   // Ambil _token
   const tokenMatch = html.match(/name="_token"\s+value="([^"]+)"/);
@@ -210,7 +210,7 @@ async function postData(item, attempt = 1) {
 
     const res = await fetchWithRetry(API_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36" },
       body: new URLSearchParams(payload).toString(),
     });
 
