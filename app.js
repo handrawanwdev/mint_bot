@@ -28,6 +28,7 @@ const PARALLEL_LIMIT = 2;
 const MAX_RETRY = 5;
 const RETRY_DELAY = 3000;
 const MAX_BACKOFF = 10000;
+const OFFSET_MS = 100; // jangan terlalu cepat
 
 if (!fs.existsSync(ERROR_DIR)) fs.mkdirSync(ERROR_DIR);
 if (!fs.existsSync(ERROR_LOG))
@@ -407,7 +408,8 @@ function getDelayToTime(hour, minute = 0, second = 0) {
     now.getDate(),
     hour,
     minute,
-    second
+    second,
+    OFFSET_MS
   );
   if (target <= now) target.setDate(target.getDate() + 1);
   return target - now;
@@ -443,5 +445,5 @@ async function scheduleBatch() {
 // ==========================
 // ▶️ JALANKAN
 // ==========================
-// scheduleBatch();
-runBatch().catch((err) => console.error("🚨 Error batch:", err));
+scheduleBatch();
+// runBatch().catch((err) => console.error("🚨 Error batch:", err));
