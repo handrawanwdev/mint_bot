@@ -10,7 +10,6 @@ const fetchCookie = require("fetch-cookie").default;
 const jar = new CookieJar();
 const fetchWithCookies = fetchCookie(undiciFetch, jar);
 
-
 // ==========================
 // ⚙️ CONFIG & CLI
 // ==========================
@@ -162,8 +161,11 @@ function readCSV(file) {
 }
 
 function checkCSVFile(file) {
+  console.log(`🔍 Cek file CSV: ${file}`);
+  console.log(`📄 Membaca file ${file}...`);
   try {
     const data = readCSV(file);
+    console.log(`📋 Ditemukan ${data.length} baris data.`);
     if (!data.length) {
       console.log(`📄 File ${file} kosong. Silakan isi data.`);
       process.exit(0);
@@ -232,6 +234,7 @@ async function postData(item, attempt = 1) {
       _token: token,
     };
 
+
     const res = await fetchWithRetry(API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36" },
@@ -248,7 +251,11 @@ async function postData(item, attempt = 1) {
     }
 
     if (html.includes("Pendaftaran Berhasil")) {
-      return { ...payload, status: "OK", info: "Pendaftaran berhasil" };
+      const no_antrian = html.match(/Nomor\s+Antrian:\s*([A-Z0-9]+\s*[A-Z]-\d+)/i);
+      if (no_antrian) {
+        console.log(`   ✅ Pendaftaran berhasil untuk ${item.ktp}|${item.name} → ${no_antrian[1]}`);
+      }
+      return { ...payload, status: "OK", info: "Pendaftaran berhasil", error_message: "" };
     }
 
     const errMatch = html.match(
@@ -262,15 +269,19 @@ async function postData(item, attempt = 1) {
       `error_${payload.ktp}_${Date.now()}.html`
     );
     fs.writeFileSync(errFile, html);
-
-    return { ...payload, status: "ERROR", error_message: errMsg };
+    console.log(`   ❌ Gagal untuk ${item.ktp}|${item.name}: ${errMsg}`);
+    fs.appendFileSync(
+      ERROR_LOG,
+      `[${timestamp()}] ${item.ktp}|${item.name}|${errMsg}\n`
+    );
+    return { ...payload, status: "ERROR", error_message: errMsg, info: `Simpan HTML error di ${errFile}` };
   } catch (err) {
     console.log(`🚨 Gagal proses ${item.ktp}|${item.name}:`, err.message);
     fs.appendFileSync(
       ERROR_LOG,
       `[${timestamp()}] ${item.ktp}|${item.name}|${err.message}\n`
     );
-    return { ...item, status: "ERROR", error_message: err.message };
+    return { ...item, status: "ERROR", error_message: err.message, info: "" };
   }
 }
 
@@ -279,7 +290,7 @@ async function postData(item, attempt = 1) {
 // ==========================
 function saveResults(data) {
   if (!data.length) return;
-  fs.writeFileSync("processedData.json", JSON.stringify(data, null, 2));
+  fs.writeFileSync(`result_${CSV_FILE.toLowerCase().replace(".csv","")}.json`, JSON.stringify(data, null, 2));
   const headers = Object.keys(data[0]);
   const csv = data
     .map((d) =>
@@ -292,34 +303,38 @@ function saveResults(data) {
   const errCount = data.filter(d => d.status === "ERROR").length;
   console.log(`✅ Selesai: ${okCount} sukses, ${errCount} gagal`);
 
-  fs.writeFileSync("processedData.csv", headers.join(",") + "\n" + csv);
-  console.log("✅ Hasil disimpan ke processedData.csv dan processedData.json");
+  fs.writeFileSync(`result_${CSV_FILE.toLowerCase().replace(".csv","")}.csv`, headers.join(",") + "\n" + csv);
+  console.log(`✅ Hasil disimpan ke result_${CSV_FILE.toLowerCase().replace(".csv","")}.csv dan result_${CSV_FILE.toLowerCase().replace(".csv","")}.json`);
 }
 
 // ==========================
 // 🧩 MAIN EXECUTION
 // ==========================
 async function runBatch() {
-  console.log("🚀 Mulai batch...");
+  console.log(`⚠️  Warning: jangan hentikan proses (CTRL+C) yang sedang berjalan!`);
+  console.log(`🚀 Mulai batch untuk ${API_URL}`);
+  console.log(`🕒 ${timestamp()}`);
   isRunning = true;
   const start = Date.now();
-
   const data = readCSV(CSV_FILE);
-  console.log(`📋 ${data.length} data dibaca`);
-
+  console.log(`Memproses ${data.length} entri dari ${CSV_FILE}`);
   for (let i = 0; i < data.length; i += PARALLEL_LIMIT) {
+    console.log(`Memproses entri ke ${i + 1} s.d ${Math.min(i + PARALLEL_LIMIT, data.length)}...`);
     const timeStart = Date.now();
     const chunk = data.slice(i, i + PARALLEL_LIMIT);
     const results = await Promise.all(chunk.map(postData));
     processedData.push(...results);
     await delay(DELAY_MS + Math.random() * 500);
-    console.log(`🔄 Proses ${i} s.d ${Math.min(i + PARALLEL_LIMIT, data.length)} dari ${data.length}`);
     const timeTaken = (Date.now() - timeStart) / 1000;
     console.log(`   ⏱️ Waktu chunk: ${timeTaken.toFixed(2)}s`);
+    console.log(`   ⏳ Tersisa: ${data.length - (i + PARALLEL_LIMIT) < 0 ? 0 : data.length - (i + PARALLEL_LIMIT)} entri`);
   }
 
   saveResults(processedData);
-  console.log(`⏱️ Selesai dalam ${(Date.now() - start) / 1000}s`);
+  console.log(`⏱️ Selesai dalam (${((Date.now() - start) / 1000).toFixed(2)} detik)`);
+  console.log(`Waktu selesai: ${timestamp()}`);
+  processedData = [];
+  retryFailCount = 0;
   isRunning = false;
 }
 
