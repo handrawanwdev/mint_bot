@@ -264,6 +264,9 @@ async function postData(item) {
         _token: token,
       };
 
+      console.log(`📤 Kirim: ${item.ktp}|${item.name} (Attempt ${attempt + 1}/2)`);
+      console.log(`   - Payload: ${JSON.stringify(payload)}`);
+
       // 2. Kirim langsung — tanpa delay!
       const postRes = await fetchWithRetry(API_URL, {
         method: "POST",
