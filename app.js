@@ -72,18 +72,18 @@ async function isServerUp() {
 // ==========================
 // 🔁 FETCH DENGAN RETRY
 // ==========================
-async function safeFetch(url, opts) {
-  try {
-    return await fetchWithRetry(url, opts);
-  } catch (err) {
-    retryFailCount++;
-    if (retryFailCount >= MAX_TOTAL_FAIL) {
-      console.error("🛑 Terlalu banyak kegagalan fetch, hentikan batch sementara");
-      process.exit(1);
-    }
-    throw err;
-  }
-}
+// async function safeFetch(url, opts) {
+//   try {
+//     return await fetchWithRetry(url, opts);
+//   } catch (err) {
+//     retryFailCount++;
+//     if (retryFailCount >= MAX_TOTAL_FAIL) {
+//       console.error("🛑 Terlalu banyak kegagalan fetch, hentikan batch sementara");
+//       process.exit(1);
+//     }
+//     throw err;
+//   }
+// }
 
 async function fetchWithRetry(url, opts = {}, retryCount = MAX_RETRY) {
   let delayMs = RETRY_DELAY;
