@@ -24,13 +24,10 @@ const ERROR_DIR = path.join(__dirname, "errors");
 const ERROR_LOG = path.join(__dirname, "errors.log");
 const API_URL = options.url || "https://antrisimatupang.com";
 const CSV_FILE = options.csv || "batch_data.csv";
-const PARALLEL_LIMIT = 3;
-const DELAY_MS = 500;
+const PARALLEL_LIMIT = 2;
 const MAX_RETRY = 5;
 const RETRY_DELAY = 3000;
 const MAX_BACKOFF = 10000;
-let retryFailCount = 0;
-const MAX_TOTAL_FAIL = 20;
 
 if (!fs.existsSync(ERROR_DIR)) fs.mkdirSync(ERROR_DIR);
 if (!fs.existsSync(ERROR_LOG))
@@ -42,6 +39,7 @@ let processedData = [];
 // ==========================
 // 🕒 HELPERS
 // ==========================
+const randomDelay = () => Math.floor(Math.random() * 800) + 400; // 400–1200ms
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 const pad = (n) => n.toString().padStart(2, "0");
 const timestamp = () => {
@@ -219,35 +217,52 @@ async function getTokenAndCaptcha() {
 // 📤 POST DATA
 // ==========================
 async function postData(item) {
-  // Coba maksimal 2x: sekali normal, sekali retry jika 419/token expired
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      // 1. Ambil halaman baru → dapatkan token & captcha segar
-      const resPage = await fetchWithRetry(API_URL, {
+      // 1. Ambil halaman baru — fresh session
+      const pageRes = await fetchWithRetry(API_URL, {
         method: "GET",
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.5",
+          "Accept-Encoding": "gzip, deflate, br",
+          "DNT": "1",
+          "Sec-Fetch-Dest": "document",
+          "Sec-Fetch-Mode": "navigate",
+          "Sec-Fetch-Site": "same-origin",
+          "Sec-Fetch-User": "?1",
+          "Connection": "keep-alive",
+          "Upgrade-Insecure-Requests": "1",
         },
       });
-      const html = await resPage.text();
+      const html = await pageRes.text();
 
-      // Cek apakah antrian ditutup
-      if (html.toUpperCase().includes("TUTUP")) {
-        throw new Error("Situs tutup: ANTRIAN DITUTUP");
+      if(html.includes("502 Bad Gateway") || html.includes("503 Service Unavailable") || html.includes("504 Gateway Timeout")) {
+        throw new Error("Server error (502/503/504)");
       }
 
-      // 2. Ekstrak _token
+      if(html.toUpperCase().includes("TUTUP") || html.toUpperCase().includes("MAAF")) {
+        throw new Error("Pendaftaran ditutup");
+      }
+
+      if (html.includes("419") || html.includes("Page Expired") || html.includes("TokenMismatch")) {
+        await delay(600 + Math.random() * 400); // retry cepat
+        return await postData(item); // retry
+      }
+
+      // Ekstrak _token
       const tokenMatch = html.match(/name="_token"\s+value="([^"]+)"/i);
       if (!tokenMatch) throw new Error("_token tidak ditemukan");
       const token = tokenMatch[1];
 
-      // 3. Ekstrak captcha (teks biasa)
+      // Ekstrak captcha (teks biasa)
       const captchaMatch = html.match(/<div[^>]+id=["']captcha-box["'][^>]*>([\s\S]*?)<\/div>/i);
       const captcha = captchaMatch
         ? captchaMatch[1].replace(/[\s\r\n\t]+/g, "").trim()
         : "";
 
-      // 4. Siapkan payload
+      // Siapkan payload
       const payload = {
         name: (item.name || "").toString().trim(),
         ktp: (item.ktp || "").toString().replace(/\D/g, "").slice(0, 16),
@@ -258,44 +273,52 @@ async function postData(item) {
         _token: token,
       };
 
-      // 5. Kirim langsung tanpa delay
+      // 2. Kirim langsung — tanpa delay!
       const postRes = await fetchWithRetry(API_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36",
-          "Referer": API_URL, // WAJIB untuk Laravel CSRF
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          "Referer": API_URL,
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.5",
+          "Accept-Encoding": "gzip, deflate, br",
+          "DNT": "1",
+          "Sec-Fetch-Dest": "document",
+          "Sec-Fetch-Mode": "navigate",
+          "Sec-Fetch-Site": "same-origin",
+          "Connection": "keep-alive",
+          "Upgrade-Insecure-Requests": "1",
         },
         body: new URLSearchParams(payload).toString(),
       });
 
       const postHtml = await postRes.text();
 
-      // 6. Cek hasil
+      // Cek keberhasilan
       if (postHtml.includes("Pendaftaran Berhasil")) {
         const noMatch = postHtml.match(/Nomor\s+Antrian:\s*([A-Z0-9]+\s*[A-Z]-\d+)/i);
         const nomor = noMatch ? noMatch[1] : "Nomor tidak terbaca";
         console.log(`   ✅ ${item.ktp}|${item.name} → ${nomor}`);
-        return { ...payload, status: "OK", info: "Pendaftaran berhasil", error_message: "" };
+        return { ...payload, status: "OK", info: `Pendaftaran berhasil, Nomor Antrian: ${nomor}`, error_message: "" };
       }
 
-      // 7. Jika 419 / Page Expired → retry sekali
+      // Cek 419 / Page Expired
       if (postHtml.includes("419") || postHtml.includes("Page Expired") || postHtml.includes("TokenMismatch")) {
         if (attempt === 0) {
-          await delay(600 + Math.random() * 400); // delay kecil
-          continue; // ulangi dari awal (ambil halaman baru)
+          await delay(600 + Math.random() * 400); // retry cepat
+          continue;
         } else {
           throw new Error("Token expired berulang");
         }
       }
 
-      // 8. Error validasi (captcha salah, KTP duplikat, dll)
+      // Error validasi
       const errMatch = postHtml.match(/<div class="alert alert-danger"[^>]*>([\s\S]*?)<\/div>/i);
       const errMsg = errMatch
         ? errMatch[1].replace(/<[^>]+>/g, "").trim() || "Validasi gagal"
         : "Error tidak dikenal";
 
-      // Simpan HTML error
       const errFile = path.join(ERROR_DIR, `error_${payload.ktp}_${Date.now()}.html`);
       fs.writeFileSync(errFile, postHtml);
       console.log(`   ❌ ${item.ktp}|${item.name}: ${errMsg}`);
@@ -316,7 +339,6 @@ async function postData(item) {
     }
   }
 
-  // Jika semua retry gagal
   return { ...item, status: "ERROR", error_message: "Gagal setelah 2 percobaan", info: "" };
 }
 
@@ -359,12 +381,15 @@ async function runBatch() {
     const chunk = data.slice(i, i + PARALLEL_LIMIT);
     const results = await Promise.all(chunk.map(postData));
     processedData.push(...results);
-    await delay(DELAY_MS + Math.random() * 500);
+    // Delay acak antar entri
+    if (i < data.length - 1) {
+      const wait = Math.floor(Math.random() * 800) + 400; // 400–1200ms
+      await delay(wait);
+    }
     const timeTaken = (Date.now() - timeStart) / 1000;
     console.log(`   ⏱️ Waktu chunk: ${timeTaken.toFixed(2)}s`);
     console.log(`   ⏳ Tersisa: ${data.length - (i + PARALLEL_LIMIT) < 0 ? 0 : data.length - (i + PARALLEL_LIMIT)} entri`);
   }
-
   saveResults(processedData);
   console.log(`⏱️ Selesai dalam (${((Date.now() - start) / 1000).toFixed(2)} detik)`);
   console.log(`Waktu selesai: ${timestamp()}`);
