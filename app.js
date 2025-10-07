@@ -3,6 +3,14 @@ const path = require("path");
 const { parse } = require("csv-parse/sync");
 const dns = require("dns").promises;
 
+const { fetch: undiciFetch } = require("undici");
+const { CookieJar } = require("tough-cookie");
+const fetchCookie = require("fetch-cookie").default;
+
+const jar = new CookieJar();
+const fetchWithCookies = fetchCookie(undiciFetch, jar);
+
+
 // ==========================
 // ⚙️ CONFIG & CLI
 // ==========================
@@ -117,7 +125,7 @@ async function fetchWithRetry(url, opts = {}, retryCount = MAX_RETRY) {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
-      const res = await fetch(url, { ...opts, signal: controller.signal });
+      const res = await fetchWithCookies(url, { ...opts, signal: controller.signal });
       clearTimeout(timeout);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res;
@@ -175,6 +183,7 @@ checkCSVFile(CSV_FILE);
 async function getTokenAndCaptcha() {
   const res = await fetchWithRetry(API_URL, { method: "GET", headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36" } });
   const html = await res.text();
+
   // Ambil _token
   const tokenMatch = html.match(/name="_token"\s+value="([^"]+)"/);
   if (!tokenMatch) throw new Error("_token tidak ditemukan");
@@ -256,6 +265,7 @@ async function postData(item, attempt = 1) {
 
     return { ...payload, status: "ERROR", error_message: errMsg };
   } catch (err) {
+    console.log(`🚨 Gagal proses ${item.ktp}|${item.name}:`, err.message);
     fs.appendFileSync(
       ERROR_LOG,
       `[${timestamp()}] ${item.ktp}|${item.name}|${err.message}\n`

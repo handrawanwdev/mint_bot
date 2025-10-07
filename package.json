@@ -1,6 +1,9 @@
 {
   "dependencies": {
-    "csv-parse": "^6.1.0"
+    "csv-parse": "^6.1.0",
+    "fetch-cookie": "^3.1.0",
+    "tough-cookie": "^6.0.0",
+    "undici": "^7.16.0"
   },
   "name": "autosignupbutiklm",
   "version": "1.0.0",
