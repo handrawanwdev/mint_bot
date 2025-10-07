@@ -389,5 +389,5 @@ async function scheduleBatch() {
 // ==========================
 // ▶️ JALANKAN
 // ==========================
-// scheduleBatch();
-runBatch().catch((err) => console.error("🚨 Error batch:", err));
+scheduleBatch();
+// runBatch().catch((err) => console.error("🚨 Error batch:", err));
