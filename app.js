@@ -22,7 +22,7 @@ args.forEach((arg) => {
 
 const ERROR_DIR = path.join(__dirname, "errors");
 const ERROR_LOG = path.join(__dirname, "errors.log");
-const API_URL = options.url || "https://antrisimatupang.com";
+const API_URL = (options.url || "https://antrisimatupang.com").trim();
 const CSV_FILE = options.csv || "batch_data.csv";
 const PARALLEL_LIMIT = 2;
 const MAX_RETRY = 5;
@@ -238,17 +238,8 @@ async function postData(item) {
       });
       const html = await pageRes.text();
 
-      if(html.includes("502 Bad Gateway") || html.includes("503 Service Unavailable") || html.includes("504 Gateway Timeout")) {
-        throw new Error("Server error (502/503/504)");
-      }
-
       if(html.toUpperCase().includes("TUTUP") || html.toUpperCase().includes("MAAF")) {
         throw new Error("Pendaftaran ditutup");
-      }
-
-      if (html.includes("419") || html.includes("Page Expired") || html.includes("TokenMismatch")) {
-        await delay(600 + Math.random() * 400); // retry cepat
-        return await postData(item); // retry
       }
 
       // Ekstrak _token
