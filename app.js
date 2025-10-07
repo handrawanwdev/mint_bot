@@ -154,7 +154,7 @@ checkCSVFile(CSV_FILE);
 // 🔐 TOKEN & CAPTCHA
 // ==========================
 async function getTokenAndCaptcha() {
-  const res = await safeFetch(API_URL);
+  const res = await fetchWithRetry(API_URL);
   const html = await res.text();
   // Ambil _token
   const tokenMatch = html.match(/name="_token"\s+value="([^"]+)"/);
@@ -208,7 +208,7 @@ async function postData(item, attempt = 1) {
       _token: token,
     };
 
-    const res = await safeFetch(API_URL, {
+    const res = await fetchWithRetry(API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams(payload).toString(),
