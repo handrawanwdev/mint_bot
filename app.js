@@ -304,7 +304,7 @@ async function postData(item) {
       // Cek 419 / Page Expired
       if (postHtml.includes("419") || postHtml.includes("Page Expired") || postHtml.includes("TokenMismatch")) {
         if (attempt === 0) {
-          await delay(600 + Math.random() * 400); // retry cepat
+          await delay(Math.floor(Math.random() * 600) + 300); // 300–900ms
           continue;
         } else {
           throw new Error("Token expired berulang");
