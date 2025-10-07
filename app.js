@@ -1,154 +1,202 @@
 const fs = require("fs");
 const path = require("path");
 const { parse } = require("csv-parse/sync");
+const dns = require("dns").promises;
 
-// Ambil argument dari command line
+// ==========================
+// ⚙️ CONFIG & CLI
+// ==========================
 const args = process.argv.slice(2);
 const options = {};
-
-// Parse argument --key=value
 args.forEach((arg) => {
-  const [key, value] = arg.split("=");
-  if (key && value) {
-    options[key.replace(/^--/, "")] = value;
-  }
+  const [k, v] = arg.split("=");
+  if (k && v) options[k.replace(/^--/, "")] = v;
 });
 
-const ERROR_LOG_PATH = path.join(__dirname, "errors.log"); // atau "errors.csv"
-if (!fs.existsSync(ERROR_LOG_PATH)) {
-  fs.writeFileSync(
-    ERROR_LOG_PATH,
-    "timestamp,ktp,name,error_message\n",
-    "utf-8"
-  );
-}
-
-// Folder tempat simpan HTML error
 const ERROR_DIR = path.join(__dirname, "errors");
-
-// Pastikan folder 'errors' sudah ada
-if (!fs.existsSync(ERROR_DIR)) {
-  fs.mkdirSync(ERROR_DIR);
-}
-
-const PARALLEL_LIMIT = 5;
-const DELAY_MS = 100; // delay antar chunk untuk aman
+const ERROR_LOG = path.join(__dirname, "errors.log");
 const API_URL = options.url || "https://antrisimatupang.com";
 const CSV_FILE = options.csv || "batch_data.csv";
-const tokenPattern = /name="_token"\s+value="([^"]+)"/;
+const PARALLEL_LIMIT = 3;
+const DELAY_MS = 500;
+const MAX_RETRY = 5;
+const RETRY_DELAY = 3000;
+const MAX_BACKOFF = 10000;
+let retryFailCount = 0;
+const MAX_TOTAL_FAIL = 20;
 
+if (!fs.existsSync(ERROR_DIR)) fs.mkdirSync(ERROR_DIR);
+if (!fs.existsSync(ERROR_LOG))
+  fs.writeFileSync(ERROR_LOG, "timestamp,ktp,name,error_message\n");
+
+let isRunning = false;
 let processedData = [];
 
-// --- HELPERS ---
-// Format waktu lokal rapi: 2025-10-06 16:25:45
-function getLocalTimestamp() {
-  const now = new Date();
-  const pad = (n) => n.toString().padStart(2, "0");
-  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(
-    now.getDate()
-  )}`;
-  const time = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(
-    now.getSeconds()
-  )}`;
-  return `${date} ${time}`;
+// ==========================
+// 🕒 HELPERS
+// ==========================
+const delay = (ms) => new Promise((res) => setTimeout(res, ms));
+const pad = (n) => n.toString().padStart(2, "0");
+const timestamp = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
+    d.getHours()
+  )}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+};
+
+// Cek koneksi internet
+async function isOnline() {
+  try {
+    await dns.resolve("google.com");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-async function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+// Cek status server
+async function isServerUp() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch(API_URL, { method: "HEAD", signal: controller.signal });
+    clearTimeout(timer);
+    return res.ok;
+  } catch (err) {
+    console.warn("⚠️ Gagal cek server:", err.name, err.message);
+    return false;
+  }
 }
 
-function readCSV(filePath) {
-  const csvPath = path.resolve(filePath);
-  if (!fs.existsSync(csvPath))
-    throw new Error(`File CSV tidak ditemukan: ${csvPath}`);
 
-  const raw = fs.readFileSync(csvPath, "utf-8");
+// ==========================
+// 🔁 FETCH DENGAN RETRY
+// ==========================
+async function safeFetch(url, opts) {
+  try {
+    return await fetchWithRetry(url, opts);
+  } catch (err) {
+    retryFailCount++;
+    if (retryFailCount >= MAX_TOTAL_FAIL) {
+      console.error("🛑 Terlalu banyak kegagalan fetch, hentikan batch sementara");
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+async function fetchWithRetry(url, opts = {}, retryCount = MAX_RETRY) {
+  let delayMs = RETRY_DELAY;
+
+  for (let attempt = 1; attempt <= retryCount; attempt++) {
+    if (!(await isOnline())) {
+      console.warn(`⚠️ [${attempt}/${retryCount}] Offline, tunggu 5 detik...`);
+      await delay(5000);
+      continue;
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch(url, { ...opts, signal: controller.signal });
+      clearTimeout(timeout);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res;
+    } catch (err) {
+      console.warn(`❌ [${attempt}/${retryCount}] ${err.message}`);
+      if (attempt < retryCount) {
+        console.log(`⏳ Retry dalam ${delayMs / 1000}s...`);
+        await delay(delayMs);
+        delayMs = Math.min(delayMs * 1.5, MAX_BACKOFF);
+      } else {
+        throw new Error(
+          `Gagal fetch setelah ${retryCount} percobaan: ${err.message}`
+        );
+      }
+    }
+  }
+}
+
+// ==========================
+// 📂 CSV READER
+// ==========================
+function readCSV(file) {
+  if (!fs.existsSync(file)) throw new Error(`CSV tidak ditemukan: ${file}`);
+  const raw = fs.readFileSync(file, "utf-8");
   const records = parse(raw, {
-    columns: (header) => header.map((h) => h.trim().toLowerCase()),
+    columns: true,
     skip_empty_lines: true,
     trim: true,
   });
-
-  const requiredCols = ["name", "ktp", "phone"];
-  const missing = requiredCols.filter((col) => !(col in records[0]));
-  if (missing.length > 0)
-    throw new Error(`Kolom hilang di CSV: ${missing.join(", ")}`);
-
+  const required = ["name", "ktp", "phone"];
+  const missing = required.filter((c) => !(c in records[0]));
+  if (missing.length) throw new Error(`Kolom hilang: ${missing.join(", ")}`);
   return records;
 }
 
-// --- Ambil token CSRF fresh + cookies ---
-async function getToken() {
-  const resp = await fetch(API_URL, {
-    headers: { "User-Agent": "Mozilla/5.0" },
-    credentials: "include", // penting agar session valid
-  });
-  const html = await resp.text();
-  const match = html.match(tokenPattern);
-  if (!match) throw new Error("_token tidak ditemukan");
-  return match[1];
-}
-
-// --- Ambil captcha (jika diperlukan) ---
-async function getCaptcha() {
+function checkCSVFile(file) {
   try {
-    const resp = await fetch(`${API_URL}/reload-captcha`, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      credentials: "include",
-    });
-    const j = await resp.json();
-    return j.captcha || "";
+    const data = readCSV(file);
+    if (!data.length) {
+      console.log(`📄 File ${file} kosong. Silakan isi data.`);
+      process.exit(0);
+    }
+    console.log(`✅ File ${file} valid dengan ${data.length} baris data.`);
   } catch (err) {
-    console.log("⚠️ Gagal ambil captcha:", err.message);
-    return "";
+    console.error(`🚨 Error baca CSV: ${err.message}`);
+    process.exit(1);
   }
 }
 
-// --- Cek hasil pendaftaran ---
-async function checkRegistration(ktp) {
-  try {
-    const resp = await fetch(`${API_URL}/search?ktp=${ktp}`, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      credentials: "include",
-    });
-    const html = await resp.text();
+checkCSVFile(CSV_FILE);
 
-    const info = {
-      website: API_URL,
-      nomorAntrian:
-        (html.match(/Nomor Antrian\s*:\s*([A-Z0-9\-]+)/) || [])[1] || "N/A",
-      ref: (html.match(/Ref\s*:\s*([0-9]+)/) || [])[1] || "N/A",
-      namaKTP: (html.match(/Nama KTP\s*:\s*([\w\s]+)/) || [])[1] || "N/A",
-      nomorKTP: (html.match(/Nomor KTP\s*:\s*(\*+[\d]+)/) || [])[1] || "N/A",
-      nomorHP: (html.match(/Nomor HP\s*:\s*(\*+[\d]+)/) || [])[1] || "N/A",
-      tanggalDatang:
-        (html.match(/Tanggal Datang\s*:\s*([\d\-]+)/) || [])[1] || "N/A",
-      wajibHadir:
-        (html.match(/Wajib Hadir\s*:\s*([\d\.: -]+)/) || [])[1] || "N/A",
-    };
+// ==========================
+// 🔐 TOKEN & CAPTCHA
+// ==========================
+async function getTokenAndCaptcha() {
+  const res = await safeFetch(API_URL);
+  const html = await res.text();
+  // Ambil _token
+  const tokenMatch = html.match(/name="_token"\s+value="([^"]+)"/);
+  if (!tokenMatch) throw new Error("_token tidak ditemukan");
+  const token = tokenMatch[1];
 
-    return `
-===== PENDAFTARAN BERHASIL =====
-Website        : ${info.website}
-Nomor Antrian  : ${info.nomorAntrian}
-Ref            : ${info.ref}
-Nama KTP       : ${info.namaKTP}
-Nomor KTP      : ${info.nomorKTP}
-Nomor HP       : ${info.nomorHP}
-Tanggal Datang : ${info.tanggalDatang}
-Wajib Hadir    : ${info.wajibHadir}
-================================
-`.trim();
-  } catch (err) {
-    return `⚠️ Gagal cek search: ${err.message}`;
-  }
+  // Ambil captcha dari <div id="captcha-box">...</div>
+  const captchaMatch = html.match(
+    /<div[^>]+id=["']captcha-box["'][^>]*>([\s\S]*?)<\/div>/i
+  );
+  const captcha = captchaMatch
+    ? captchaMatch[1].replace(/[\s\r\n]+/g, "").trim()
+    : "";
+
+  if (!captcha) console.warn("⚠️ Captcha tidak ditemukan di halaman utama.");
+
+  return { token, captcha };
 }
 
-// --- POST DATA ---
-async function postData(item) {
+// async function getCaptcha() {
+//   try {
+//     const res = await safeFetch(`${API_URL}/reload-captcha`);
+//     const j = await res.json();
+//     return j.captcha || "";
+//   } catch (err) {
+//     console.log("⚠️ Gagal ambil captcha:", err.message);
+//     return "";
+//   }
+// }
+
+// ==========================
+// 📤 POST DATA
+// ==========================
+async function postData(item, attempt = 1) {
   try {
-    const token = await getToken();
-    const captcha = await getCaptcha();
+    if (!(await isServerUp())) {
+      console.log("🔴 Server down, skip sementara...");
+      await delay(3000 + Math.random() * 2000);
+      return { ...item, status: "ERROR", error_message: "Server down" };
+    }
+
+    const { token, captcha } = await getTokenAndCaptcha();
 
     const payload = {
       name: item.name,
@@ -160,136 +208,103 @@ async function postData(item) {
       _token: token,
     };
 
-    const resp = await fetch(API_URL, {
+    const res = await safeFetch(API_URL, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "Mozilla/5.0",
-      },
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams(payload).toString(),
-      credentials: "include",
     });
 
-    const resultText = await resp.text();
-    let registrationInfo = "";
+    const html = await res.text();
 
-    if (resultText.includes("Pendaftaran Berhasil")) {
-      registrationInfo = await checkRegistration(payload.ktp);
-      return {
-        ...payload,
-        status: "OK",
-        resultSnippet: resultText,
-        registrationInfo,
-      };
-    } else {
-      const errorContent = resultText;
-      const errorMessageMatch = errorContent.match(
-        /<div class="alert alert-danger" role="alert">([\s\S]*?)<\/div>/
-      );
-
-      const errorMessage = errorMessageMatch
-        ? errorMessageMatch[1].replace(/<[^>]+>/g, "").trim()
-        : "Pendaftaran gagal tanpa pesan error spesifik.";
-
-      // Buat nama file aman untuk disimpan
-      const safeKtp = payload.ktp.replace(/\D/g, "");
-      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const fileName = `error_${safeKtp}_${timestamp}.html`;
-      const filePath = path.join(ERROR_DIR, fileName);
-
-      // Simpan full HTML response agar bisa dianalisis nanti
-      fs.writeFileSync(filePath, resultText);
-
-      console.log(`❌ Error disimpan di: ${filePath}`);
-
-      return {
-        ...payload,
-        status: "ERROR",
-        error_message: errorMessage,
-        html_file: fileName,
-        registrationInfo: "",
-      };
+    if (html.includes("Page Expired") || html.includes("419")) {
+      if (attempt >= 3) return { ...payload, status: "ERROR", error_message: "Token kadaluarsa terus menerus" };
+      console.warn("⚠️ Token kadaluarsa, retry 1x...");
+      await delay(1000 + Math.random() * 2000); // jeda kecil antar retry
+      return await postData(item, attempt + 1);
     }
+
+    if (html.includes("Pendaftaran Berhasil")) {
+      return { ...payload, status: "OK", info: "Pendaftaran berhasil" };
+    }
+
+    const errMatch = html.match(
+      /<div class="alert alert-danger"[^>]*>([\s\S]*?)<\/div>/
+    );
+    const errMsg = errMatch
+      ? errMatch[1].replace(/<[^>]+>/g, "").trim()
+      : "Error tidak diketahui";
+    const errFile = path.join(
+      ERROR_DIR,
+      `error_${payload.ktp}_${Date.now()}.html`
+    );
+    fs.writeFileSync(errFile, html);
+
+    return { ...payload, status: "ERROR", error_message: errMsg };
   } catch (err) {
-    const logLine = `[${getLocalTimestamp()}] ${item.ktp} | ${
-      item.name || "-"
-    } | ${err.message}\n`;
-    fs.appendFileSync(ERROR_LOG_PATH, logLine, "utf-8");
-    return {
-      ...item,
-      status: "ERROR",
-      error_message: err.message,
-      registrationInfo: "",
-    };
+    fs.appendFileSync(
+      ERROR_LOG,
+      `[${timestamp()}] ${item.ktp}|${item.name}|${err.message}\n`
+    );
+    return { ...item, status: "ERROR", error_message: err.message };
   }
 }
 
-// --- SIMPAN HASIL ---
+// ==========================
+// 💾 SAVE RESULT
+// ==========================
 function saveResults(data) {
   if (!data.length) return;
-
-  const allKeys = new Set();
-  data.forEach((r) => Object.keys(r).forEach((k) => allKeys.add(k)));
-  const headers = Array.from(allKeys);
-
-  // JSON
   fs.writeFileSync("processedData.json", JSON.stringify(data, null, 2));
-  console.log("✅ Semua data disimpan ke processedData.json");
-
-  // CSV
+  const headers = Object.keys(data[0]);
   const csv = data
-    .map((r) =>
+    .map((d) =>
       headers
-        .map((h) => {
-          let val = r[h] !== undefined ? String(r[h]) : "";
-          val = val.replace(/"/g, '""').replace(/\r?\n/g, "\\n");
-          return `"${val}"`;
-        })
+        .map((h) => `"${(d[h] ?? "").toString().replace(/"/g, '""')}"`)
         .join(",")
     )
     .join("\n");
+  const okCount = data.filter(d => d.status === "OK").length;
+  const errCount = data.filter(d => d.status === "ERROR").length;
+  console.log(`✅ Selesai: ${okCount} sukses, ${errCount} gagal`);
 
   fs.writeFileSync("processedData.csv", headers.join(",") + "\n" + csv);
-  console.log("✅ CSV hasil disimpan ke processedData.csv");
+  console.log("✅ Hasil disimpan ke processedData.csv dan processedData.json");
 }
 
-// --- MAIN BATCH ---
+// ==========================
+// 🧩 MAIN EXECUTION
+// ==========================
 async function runBatch() {
   console.log("🚀 Mulai batch...");
+  isRunning = true;
+  const start = Date.now();
 
-  const startTime = Date.now();
-  const batchData = readCSV(CSV_FILE);
-  console.log(`📋 Membaca ${batchData.length} data dari ${CSV_FILE}`);
+  const data = readCSV(CSV_FILE);
+  console.log(`📋 ${data.length} data dibaca`);
 
-  for (let i = 0; i < batchData.length; i += PARALLEL_LIMIT) {
-    const chunk = batchData.slice(i, i + PARALLEL_LIMIT);
-    const promises = chunk.map((item) => postData(item));
-    const results = await Promise.all(promises);
+  for (let i = 0; i < data.length; i += PARALLEL_LIMIT) {
+    const timeStart = Date.now();
+    const chunk = data.slice(i, i + PARALLEL_LIMIT);
+    const results = await Promise.all(chunk.map(postData));
     processedData.push(...results);
-
-    results.forEach((r, idx) => {
-      console.log(
-        `\n📌 Item ${i + idx + 1} - ${r.name || r.ktp} - Status: ${r.status}`
-      );
-      if (r.status === "OK" && r.registrationInfo)
-        console.log(r.registrationInfo);
-      if (r.status === "ERROR") console.log(`⚠️ Error: ${r.error_message}`);
-    });
-
-    await delay(DELAY_MS);
+    await delay(DELAY_MS + Math.random() * 500);
+    console.log(`🔄 Proses ${i} s.d ${Math.min(i + PARALLEL_LIMIT, data.length)} dari ${data.length}`);
+    const timeTaken = (Date.now() - timeStart) / 1000;
+    console.log(`   ⏱️ Waktu chunk: ${timeTaken.toFixed(2)}s`);
   }
 
   saveResults(processedData);
-  const durasi = (Date.now() - startTime) / 1000;
-  console.log(`\n⏱️ Selesai dalam ${durasi.toFixed(2)} detik`);
+  console.log(`⏱️ Selesai dalam ${(Date.now() - start) / 1000}s`);
+  isRunning = false;
 }
 
-// ======= VARIABEL JAM DINAMIS =======
-const SCHEDULE_HOUR = parseInt(options.hour) || 15; // example default 15 = jam 3 sore
-const SCHEDULE_MINUTE = parseInt(options.minute) || 0; // example default 0 = menit 0
-const SCHEDULE_SECOND = parseInt(options.second) || 0; // example default 0 = detik 0
+// ==========================
+// ⏰ SCHEDULER
+// ==========================
+const SCHEDULE_HOUR = parseInt(options.hour) || 15;
+const SCHEDULE_MINUTE = parseInt(options.minute) || 0;
+const SCHEDULE_SECOND = parseInt(options.second) || 0;
 
-// ======= HITUNG DELAY MS KE WAKTU TARGET =======
 function getDelayToTime(hour, minute = 0, second = 0) {
   const now = new Date();
   const target = new Date(
@@ -300,45 +315,39 @@ function getDelayToTime(hour, minute = 0, second = 0) {
     minute,
     second
   );
-
-  // Kalau target sudah lewat hari ini, jadwalkan besok
-  if (target <= now) {
-    target.setDate(target.getDate() + 1);
-  }
-
-  return target - now; // dalam ms
+  if (target <= now) target.setDate(target.getDate() + 1);
+  return target - now;
 }
 
-// ======= SCHEDULE BATCH OTOMATIS =======
 async function scheduleBatch() {
   let delayMs = getDelayToTime(SCHEDULE_HOUR, SCHEDULE_MINUTE, SCHEDULE_SECOND);
-
-  setInterval(() => {
-    // Konversi detik ke jam, menit, detik
-    delayMs = getDelayToTime(SCHEDULE_HOUR, SCHEDULE_MINUTE, SCHEDULE_SECOND);
-    const hours = Math.floor(delayMs / 3600000);
-    const minutes = Math.floor((delayMs % 3600000) / 60000);
-    const seconds = Math.floor((delayMs % 60000) / 1000);
-    process.stdout.write(
-      `\r🕒 Menunggu batch berikutnya pada ${delayMs} ms → ${hours} jam ${minutes} menit ${seconds} detik`
-    );
-  }, 1000);
-
   console.log(
     `🕒 [${API_URL}] Batch dijadwalkan pukul ${SCHEDULE_HOUR}:${SCHEDULE_MINUTE}:${SCHEDULE_SECOND} (delay ${Math.round(
       delayMs / 1000
     )} detik)`
   );
 
-  setTimeout(async () => {
-    console.log(`\n⏰ Waktu batch tiba! Mulai runBatch()`);
-    await runBatch().catch((err) => console.error("🚨 Error batch:", err));
+  setInterval(async () => {
+    delayMs = getDelayToTime(SCHEDULE_HOUR, SCHEDULE_MINUTE, SCHEDULE_SECOND);
+    const hours = Math.floor(delayMs / 3600000);
+    const minutes = Math.floor((delayMs % 3600000) / 60000);
+    const seconds = Math.floor((delayMs % 60000) / 1000);
 
-    // Setelah selesai, schedule batch besok pada jam yang sama
-    scheduleBatch();
-  }, delayMs);
+    if (!isRunning) {
+      process.stdout.write(
+        `\r🕒 Menunggu batch berikutnya → ${hours} jam ${minutes} menit ${seconds} detik`
+      );
+    }
+
+    if (hours === 0 && minutes === 0 && seconds === 0 && !isRunning) {
+      console.log("\n⏰ Waktu batch tiba! Mulai runBatch()");
+      await runBatch().catch((err) => console.error("🚨 Error batch:", err));
+    }
+  }, 1000);
 }
 
-// ======= JALANKAN SCHEDULER =======
+// ==========================
+// ▶️ JALANKAN
+// ==========================
 // scheduleBatch();
 runBatch().catch((err) => console.error("🚨 Error batch:", err));
