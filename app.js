@@ -68,6 +68,25 @@ async function isServerUp() {
   }
 }
 
+async function waitUntilServerUp(retryDelay = 5000) {
+  while (true) {
+    const online = await isOnline();
+    if (!online) {
+      console.log("⚠️ Tidak ada koneksi internet, tunggu koneksi...");
+      await delay(retryDelay);
+      continue;
+    }
+
+    const serverUp = await isServerUp();
+    if (serverUp) {
+      // console.log("🟢 Server up, lanjut eksekusi...");
+      return;
+    }
+
+    console.log(`🔴 Server masih down, ulangi cek dalam ${retryDelay / 1000} detik...`);
+    await delay(retryDelay + Math.random() * 2000);
+  }
+}
 
 // ==========================
 // 🔁 FETCH DENGAN RETRY
@@ -167,7 +186,7 @@ async function getTokenAndCaptcha() {
   );
   const captcha = captchaMatch
     ? captchaMatch[1].replace(/[\s\r\n]+/g, "").trim()
-    : "";
+    : null;
 
   if (!captcha) console.warn("⚠️ Captcha tidak ditemukan di halaman utama.");
 
@@ -190,11 +209,7 @@ async function getTokenAndCaptcha() {
 // ==========================
 async function postData(item, attempt = 1) {
   try {
-    if (!(await isServerUp())) {
-      console.log("🔴 Server down, skip sementara...");
-      await delay(3000 + Math.random() * 2000);
-      return { ...item, status: "ERROR", error_message: "Server down" };
-    }
+    await waitUntilServerUp();
 
     const { token, captcha } = await getTokenAndCaptcha();
 
