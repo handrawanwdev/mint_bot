@@ -181,27 +181,27 @@ checkCSVFile(CSV_FILE);
 // ==========================
 // 🔐 TOKEN & CAPTCHA
 // ==========================
-async function getTokenAndCaptcha() {
-  const res = await fetchWithRetry(API_URL, { method: "GET", headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36" } });
-  const html = await res.text();
+// async function getTokenAndCaptcha() {
+//   const res = await fetchWithRetry(API_URL, { method: "GET", headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36" } });
+//   const html = await res.text();
 
-  // Ambil _token
-  const tokenMatch = html.match(/name="_token"\s+value="([^"]+)"/);
-  if (!tokenMatch) throw new Error("_token tidak ditemukan");
-  const token = tokenMatch[1];
+//   // Ambil _token
+//   const tokenMatch = html.match(/name="_token"\s+value="([^"]+)"/);
+//   if (!tokenMatch) throw new Error("_token tidak ditemukan");
+//   const token = tokenMatch[1];
 
-  // Ambil captcha dari <div id="captcha-box">...</div>
-  const captchaMatch = html.match(
-    /<div[^>]+id=["']captcha-box["'][^>]*>([\s\S]*?)<\/div>/i
-  );
-  const captcha = captchaMatch
-    ? captchaMatch[1].replace(/[\s\r\n]+/g, "").trim()
-    : null;
+//   // Ambil captcha dari <div id="captcha-box">...</div>
+//   const captchaMatch = html.match(
+//     /<div[^>]+id=["']captcha-box["'][^>]*>([\s\S]*?)<\/div>/i
+//   );
+//   const captcha = captchaMatch
+//     ? captchaMatch[1].replace(/[\s\r\n]+/g, "").trim()
+//     : null;
 
-  if (!captcha) console.warn("⚠️ Captcha tidak ditemukan di halaman utama.");
+//   if (!captcha) console.warn("⚠️ Captcha tidak ditemukan di halaman utama.");
 
-  return { token, captcha };
-}
+//   return { token, captcha };
+// }
 
 // async function getCaptcha() {
 //   try {
@@ -218,10 +218,13 @@ async function getTokenAndCaptcha() {
 // 📤 POST DATA
 // ==========================
 async function postData(item) {
+  
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
+      const localJar = new CookieJar(); // fresh session per KTP
+      const localFetch = fetchCookie(undiciFetch, localJar);
       // 1. Ambil halaman baru — fresh session
-      const pageRes = await fetchWithRetry(API_URL, {
+      const pageRes = await localFetch(API_URL, {
         method: "GET",
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -269,7 +272,7 @@ async function postData(item) {
       console.log(`   - Payload: ${JSON.stringify(payload)}`);
 
       // 2. Kirim langsung — tanpa delay!
-      const postRes = await fetchWithRetry(API_URL, {
+      const postRes = await localFetch(API_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
@@ -369,6 +372,9 @@ async function runBatch() {
   isRunning = true;
   const start = Date.now();
   const data = readCSV(CSV_FILE);
+  const now = new Date();
+  const isPeakTime = now.getHours() === 15 && now.getMinutes() < 2;
+  const limit = isPeakTime ? 2 : 1;
   console.log(`Memproses ${data.length} entri dari ${CSV_FILE}`);
   for (let i = 0; i < data.length; i += PARALLEL_LIMIT) {
     console.log(`Memproses entri ke ${i + 1} s.d ${Math.min(i + PARALLEL_LIMIT, data.length)}...`);
@@ -376,14 +382,13 @@ async function runBatch() {
     const chunk = data.slice(i, i + PARALLEL_LIMIT);
     const results = await Promise.all(chunk.map(postData));
     processedData.push(...results);
-    // Delay acak antar entri
-    if (i < data.length - 1) {
-      const wait = Math.floor(Math.random() * 800) + 400; // 400–1200ms
-      await delay(wait);
+    // Delay hanya jika belum selesai
+    if (i + limit < data.length) {
+      await delay(Math.floor(Math.random() * 600) + 300); // 300–900ms
     }
     const timeTaken = (Date.now() - timeStart) / 1000;
     console.log(`   ⏱️ Waktu chunk: ${timeTaken.toFixed(2)}s`);
-    console.log(`   ⏳ Tersisa: ${data.length - (i + PARALLEL_LIMIT) < 0 ? 0 : data.length - (i + PARALLEL_LIMIT)} entri`);
+    console.log(`   ⏳ Tersisa: ${data.length - (i + limit) < 0 ? 0 : data.length - (i + limit)} entri`);
   }
   saveResults(processedData);
   console.log(`⏱️ Selesai dalam (${((Date.now() - start) / 1000).toFixed(2)} detik)`);
