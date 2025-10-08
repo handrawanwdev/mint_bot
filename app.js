@@ -7,9 +7,6 @@ const { fetch: undiciFetch } = require("undici");
 const { CookieJar } = require("tough-cookie");
 const fetchCookie = require("fetch-cookie").default;
 
-const jar = new CookieJar();
-const fetchWithCookies = fetchCookie(undiciFetch, jar);
-
 // ==========================
 // ⚙️ CONFIG & CLI
 // ==========================
@@ -22,25 +19,23 @@ args.forEach((arg) => {
 
 const ERROR_DIR = path.join(__dirname, "errors");
 const ERROR_LOG = path.join(__dirname, "errors.log");
+const PAGES_DIR = path.join(__dirname, "pages");
 const API_URL = (options.url || "https://antrisimatupang.com").trim();
 const CSV_FILE = options.csv || "batch_data.csv";
 const PARALLEL_LIMIT = 2;
-const MAX_RETRY = 5;
-const RETRY_DELAY = 3000;
-const MAX_BACKOFF = 10000;
 const OFFSET_MS = 100; // jangan terlalu cepat
 
 if (!fs.existsSync(ERROR_DIR)) fs.mkdirSync(ERROR_DIR);
-if (!fs.existsSync(ERROR_LOG))
-  fs.writeFileSync(ERROR_LOG, "timestamp,ktp,name,error_message\n");
+if (!fs.existsSync(ERROR_LOG)) fs.writeFileSync(ERROR_LOG, "timestamp,ktp,name,error_message\n");
+if (!fs.existsSync(PAGES_DIR)) fs.mkdirSync(PAGES_DIR);
 
 let isRunning = false;
 let processedData = [];
+let successKTP = [];
 
 // ==========================
 // 🕒 HELPERS
 // ==========================
-const randomDelay = () => Math.floor(Math.random() * 800) + 400; // 400–1200ms
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 const pad = (n) => n.toString().padStart(2, "0");
 const timestamp = () => {
@@ -74,71 +69,21 @@ async function isServerUp() {
   }
 }
 
-async function waitUntilServerUp(retryDelay = 5000) {
+async function waitUntilServerUp(retryDelay = 3000) {
   while (true) {
     const online = await isOnline();
     if (!online) {
-      console.log("⚠️ Tidak ada koneksi internet, tunggu koneksi...");
+      // console.log("⚠️ Tidak ada koneksi internet, tunggu koneksi...");
       await delay(retryDelay);
       continue;
     }
-
     const serverUp = await isServerUp();
     if (serverUp) {
       // console.log("🟢 Server up, lanjut eksekusi...");
       return;
     }
-
-    console.log(`🔴 Server masih down, ulangi cek dalam ${retryDelay / 1000} detik...`);
-    await delay(retryDelay + Math.random() * 2000);
-  }
-}
-
-// ==========================
-// 🔁 FETCH DENGAN RETRY
-// ==========================
-// async function safeFetch(url, opts) {
-//   try {
-//     return await fetchWithRetry(url, opts);
-//   } catch (err) {
-//     retryFailCount++;
-//     if (retryFailCount >= MAX_TOTAL_FAIL) {
-//       console.error("🛑 Terlalu banyak kegagalan fetch, hentikan batch sementara");
-//       process.exit(1);
-//     }
-//     throw err;
-//   }
-// }
-
-async function fetchWithRetry(url, opts = {}, retryCount = MAX_RETRY) {
-  let delayMs = RETRY_DELAY;
-
-  for (let attempt = 1; attempt <= retryCount; attempt++) {
-    if (!(await isOnline())) {
-      console.warn(`⚠️ [${attempt}/${retryCount}] Offline, tunggu 5 detik...`);
-      await delay(5000);
-      continue;
-    }
-
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
-      const res = await fetchWithCookies(url, { ...opts, signal: controller.signal });
-      clearTimeout(timeout);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res;
-    } catch (err) {
-      console.warn(`❌ [${attempt}/${retryCount}] ${err.message}`);
-      if (attempt < retryCount) {
-        console.log(`⏳ Retry dalam ${delayMs / 1000}s...`);
-        await delay(delayMs);
-        delayMs = Math.min(delayMs * 1.5, MAX_BACKOFF);
-      } else {
-        throw new Error(
-          `Gagal fetch setelah ${retryCount} percobaan: ${err.message}`
-        );
-      }
-    }
+    // console.log(`🔴 Server masih down, ulangi cek dalam ${retryDelay / 1000} detik...`);
+    await delay(retryDelay + Math.random() * 1000);
   }
 }
 
@@ -179,85 +124,42 @@ function checkCSVFile(file) {
 checkCSVFile(CSV_FILE);
 
 // ==========================
-// 🔐 TOKEN & CAPTCHA
-// ==========================
-// async function getTokenAndCaptcha() {
-//   const res = await fetchWithRetry(API_URL, { method: "GET", headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36" } });
-//   const html = await res.text();
-
-//   // Ambil _token
-//   const tokenMatch = html.match(/name="_token"\s+value="([^"]+)"/);
-//   if (!tokenMatch) throw new Error("_token tidak ditemukan");
-//   const token = tokenMatch[1];
-
-//   // Ambil captcha dari <div id="captcha-box">...</div>
-//   const captchaMatch = html.match(
-//     /<div[^>]+id=["']captcha-box["'][^>]*>([\s\S]*?)<\/div>/i
-//   );
-//   const captcha = captchaMatch
-//     ? captchaMatch[1].replace(/[\s\r\n]+/g, "").trim()
-//     : null;
-
-//   if (!captcha) console.warn("⚠️ Captcha tidak ditemukan di halaman utama.");
-
-//   return { token, captcha };
-// }
-
-// async function getCaptcha() {
-//   try {
-//     const res = await safeFetch(`${API_URL}/reload-captcha`);
-//     const j = await res.json();
-//     return j.captcha || "";
-//   } catch (err) {
-//     console.log("⚠️ Gagal ambil captcha:", err.message);
-//     return "";
-//   }
-// }
-
-// ==========================
 // 📤 POST DATA
 // ==========================
-async function postData(item) {
-  
-  for (let attempt = 0; attempt < 2; attempt++) {
+async function postDataContinuous(item) {
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    console.log(`🔄 [${item.ktp}|${item.name}] Coba ke-${attempt}...`);
     try {
       const localJar = new CookieJar(); // fresh session per KTP
       const localFetch = fetchCookie(undiciFetch, localJar);
-      // 1. Ambil halaman baru — fresh session
+
+      // Ambil halaman baru — fresh session
       const pageRes = await localFetch(API_URL, {
         method: "GET",
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.5",
-          "Accept-Encoding": "gzip, deflate, br",
-          "DNT": "1",
-          "Sec-Fetch-Dest": "document",
-          "Sec-Fetch-Mode": "navigate",
-          "Sec-Fetch-Site": "same-origin",
-          "Sec-Fetch-User": "?1",
-          "Connection": "keep-alive",
-          "Upgrade-Insecure-Requests": "1",
+          "User-Agent": "Mozilla/5.0",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
       });
       const html = await pageRes.text();
+      const resFile = path.join(PAGES_DIR, `page_${item.ktp}.html`);
+      fs.writeFileSync(resFile, html);
 
       if(html.toUpperCase().includes("TUTUP") || html.toUpperCase().includes("MAAF")) {
         throw new Error("Pendaftaran ditutup");
       }
 
-      // Ekstrak _token
+      // Ambil _token
       const tokenMatch = html.match(/name="_token"\s+value="([^"]+)"/i);
       if (!tokenMatch) throw new Error("_token tidak ditemukan");
       const token = tokenMatch[1];
 
-      // Ekstrak captcha (teks biasa)
+      // Ambil captcha
       const captchaMatch = html.match(/<div[^>]+id=["']captcha-box["'][^>]*>([\s\S]*?)<\/div>/i);
-      const captcha = captchaMatch
-        ? captchaMatch[1].replace(/[\s\r\n\t]+/g, "").trim()
-        : "";
+      const captcha = captchaMatch ? captchaMatch[1].replace(/[\s\r\n\t]+/g, "").trim() : "";
 
-      // Siapkan payload
       const payload = {
         name: (item.name || "").toString().trim(),
         ktp: (item.ktp || "").toString().replace(/\D/g, "").slice(0, 16),
@@ -268,32 +170,17 @@ async function postData(item) {
         _token: token,
       };
 
-      console.log(`📤 Kirim: ${item.ktp}|${item.name} (Attempt ${attempt + 1}/2)`);
-      console.log(`   - Payload: ${JSON.stringify(payload)}`);
+      console.log(`📤 Kirim: ${item.ktp}|${item.name} (Attempt ${attempt})`);
 
-      // 2. Kirim langsung — tanpa delay!
       const postRes = await localFetch(API_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          "Referer": API_URL,
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.5",
-          "Accept-Encoding": "gzip, deflate, br",
-          "DNT": "1",
-          "Sec-Fetch-Dest": "document",
-          "Sec-Fetch-Mode": "navigate",
-          "Sec-Fetch-Site": "same-origin",
-          "Connection": "keep-alive",
-          "Upgrade-Insecure-Requests": "1",
         },
         body: new URLSearchParams(payload).toString(),
       });
-
       const postHtml = await postRes.text();
 
-      // Cek keberhasilan
       if (postHtml.includes("Pendaftaran Berhasil")) {
         const noMatch = postHtml.match(/Nomor\s+Antrian:\s*([A-Z0-9]+\s*[A-Z]-\d+)/i);
         const nomor = noMatch ? noMatch[1] : "Nomor tidak terbaca";
@@ -301,43 +188,20 @@ async function postData(item) {
         return { ...payload, status: "OK", info: `Pendaftaran berhasil, Nomor Antrian: ${nomor}`, error_message: "" };
       }
 
-      // Cek 419 / Page Expired
-      if (postHtml.includes("419") || postHtml.includes("Page Expired") || postHtml.includes("TokenMismatch")) {
-        if (attempt === 0) {
-          await delay(Math.floor(Math.random() * 600) + 300); // 300–900ms
-          continue;
-        } else {
-          throw new Error("Token expired berulang");
-        }
-      }
-
-      // Error validasi
+      // Jika gagal validasi
       const errMatch = postHtml.match(/<div class="alert alert-danger"[^>]*>([\s\S]*?)<\/div>/i);
-      const errMsg = errMatch
-        ? errMatch[1].replace(/<[^>]+>/g, "").trim() || "Validasi gagal"
-        : "Error tidak dikenal";
-
-      const errFile = path.join(ERROR_DIR, `error_${payload.ktp}_${Date.now()}.html`);
-      fs.writeFileSync(errFile, postHtml);
+      const errMsg = errMatch ? errMatch[1].replace(/<[^>]+>/g, "").trim() || "Validasi gagal" : "Error tidak dikenal";
       console.log(`   ❌ ${item.ktp}|${item.name}: ${errMsg}`);
-      fs.appendFileSync(ERROR_LOG, `${timestamp()},${item.ktp},${item.name},"${errMsg}"\n`);
+      fs.appendFileSync(ERROR_LOG, `[${timestamp()}] | ${item.ktp},${item.name},"${errMsg}"\n`);
 
-      return {
-        ...payload,
-        status: "ERROR",
-        error_message: errMsg,
-        info: `HTML: ${path.basename(errFile)}`,
-      };
+      // Delay random kecil sebelum retry
+      await delay(500 + Math.random() * 1000);
 
     } catch (err) {
-      const msg = err.message || "Unknown error";
-      console.log(`   🚨 ${item.ktp}|${item.name}: ${msg}`);
-      fs.appendFileSync(ERROR_LOG, `${timestamp()},${item.ktp},${item.name},"${msg}"\n`);
-      return { ...item, status: "ERROR", error_message: msg, info: "" };
+      console.log(`   🚨 ${item.ktp}|${item.name}: ${err.message}`);
+      await delay(1000 + Math.random() * 2000);
     }
   }
-
-  return { ...item, status: "ERROR", error_message: "Gagal setelah 2 percobaan", info: "" };
 }
 
 // ==========================
@@ -380,11 +244,11 @@ async function runBatch() {
     console.log(`Memproses entri ke ${i + 1} s.d ${Math.min(i + PARALLEL_LIMIT, data.length)}...`);
     const timeStart = Date.now();
     const chunk = data.slice(i, i + PARALLEL_LIMIT);
-    const results = await Promise.all(chunk.map(postData));
+    const results = await Promise.all(chunk.map(postDataContinuous));
     processedData.push(...results);
     // Delay hanya jika belum selesai
     if (i + limit < data.length) {
-      await delay(Math.floor(Math.random() * 600) + 300); // 300–900ms
+      await delay(Math.floor(Math.random() * 600) + 200); // 300–900ms
     }
     const timeTaken = (Date.now() - timeStart) / 1000;
     console.log(`   ⏱️ Waktu chunk: ${timeTaken.toFixed(2)}s`);
@@ -404,6 +268,7 @@ async function runBatch() {
 const SCHEDULE_HOUR = parseInt(options.hour) || 15;
 const SCHEDULE_MINUTE = parseInt(options.minute) || 0;
 const SCHEDULE_SECOND = parseInt(options.second) || 0;
+const MODE_APP = options.mode;
 
 function getDelayToTime(hour, minute = 0, second = 0) {
   const now = new Date();
@@ -423,7 +288,7 @@ function getDelayToTime(hour, minute = 0, second = 0) {
 async function scheduleBatch() {
   let delayMs = getDelayToTime(SCHEDULE_HOUR, SCHEDULE_MINUTE, SCHEDULE_SECOND);
   console.log(
-    `🕒 [${API_URL}] Batch dijadwalkan pukul ${SCHEDULE_HOUR}:${SCHEDULE_MINUTE}:${SCHEDULE_SECOND} (delay ${Math.round(
+    `🕒 [${API_URL}] Batch dijadwalkan pukul ${String(SCHEDULE_HOUR).padStart(2, '0')}:${String(SCHEDULE_MINUTE).padStart(2, '0')}:${String(SCHEDULE_SECOND).padStart(2, '0')} (delay ${Math.round(
       delayMs / 1000
     )} detik)`
   );
@@ -436,7 +301,7 @@ async function scheduleBatch() {
 
     if (!isRunning) {
       process.stdout.write(
-        `\r🕒 Menunggu batch berikutnya → ${hours} jam ${minutes} menit ${seconds} detik`
+        `\r🕒 Menunggu batch berikutnya → ${String(hours).padStart(2, '0')} jam ${String(minutes).padStart(2, '0')} menit ${String(seconds).padStart(2, '0')} detik`
       );
     }
 
@@ -450,5 +315,8 @@ async function scheduleBatch() {
 // ==========================
 // ▶️ JALANKAN
 // ==========================
-scheduleBatch();
-// runBatch().catch((err) => console.error("🚨 Error batch:", err));
+if(MODE_APP && MODE_APP == "0"){
+  runBatch().catch((err) => console.error("🚨 Error batch:", err));
+}else{
+  scheduleBatch();
+}
